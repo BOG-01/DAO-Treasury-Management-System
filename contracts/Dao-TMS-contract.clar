@@ -500,3 +500,281 @@
     )
   )
 )
+
+;; Helper to add allocation percentages
+(define-private (add-allocation 
+  (total uint) 
+  (allocation { asset-id: (string-ascii 20), allocation-bp: uint }))
+  
+  (+ total (get allocation-bp allocation))
+)
+
+;; Calculate strategy risk profile based on asset allocations
+(define-private (calculate-strategy-risk 
+  (allocations (list 20 { asset-id: (string-ascii 20), allocation-bp: uint })))
+  
+  (let (
+    (weighted-risk (fold add-weighted-risk u0 allocations))
+  )
+    ;; Divide by 10000 (100%) to get average risk
+    (/ weighted-risk u10000)
+  )
+)
+
+;; Helper to calculate weighted risk
+(define-private (add-weighted-risk 
+  (total uint) 
+  (allocation { asset-id: (string-ascii 20), allocation-bp: uint }))
+  
+  (let (
+    (asset-id (get asset-id allocation))
+    (allocation-bp (get allocation-bp allocation))
+    (asset (map-get? assets { asset-id: asset-id }))
+  )
+    (if (is-some asset)
+      (+ total (* allocation-bp (get risk-score (unwrap-panic asset))))
+      total
+    )
+  )
+)
+
+;; Submit a proposal
+(define-public (submit-proposal
+  (title (string-ascii 64))
+  (description (string-utf8 512))
+  (proposal-type uint)
+  (strategy-id (optional uint))
+  (parameter-key (optional (string-ascii 30)))
+  (parameter-value (optional uint))
+  (assets-affected (list 10 (string-ascii 20)))
+  (transaction-data (optional (string-utf8 512)))
+  (dca-schedule-id (optional uint)))
+  
+  (let (
+    (proposer tx-sender)
+    (proposal-id (var-get next-proposal-id))
+    (voting-period (var-get voting-period))
+    (execution-delay (var-get execution-delay))
+    (proposal-threshold (var-get minimum-proposal-threshold))
+  )
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate proposal type
+    (asserts! (< proposal-type u5) err-invalid-parameters)
+    
+    ;; Check if proposer has enough tokens
+    (let (
+      (proposer-balance (unwrap! (contract-call? (var-get dao-token-contract) get-balance proposer) err-transaction-failed))
+    )
+      (asserts! (>= proposer-balance proposal-threshold) err-not-enough-votes)
+      
+      ;; Validate proposal-specific parameters
+      (if (is-eq proposal-type u1) ;; Strategy Change
+        (asserts! (and (is-some strategy-id) 
+                      (is-some (map-get? strategies { strategy-id: (unwrap-panic strategy-id) }))) 
+                  err-strategy-not-found)
+        true
+      )
+      
+      (if (is-eq proposal-type u2) ;; Parameter Change
+        (asserts! (and (is-some parameter-key) 
+                      (is-some parameter-value) 
+                      (is-some (map-get? dao-parameters { param-key: (unwrap-panic parameter-key) }))) 
+                  err-invalid-parameters)
+        true
+      )
+      
+      (if (is-eq proposal-type u3) ;; DCA Schedule
+        (if (is-some dca-schedule-id)
+          (asserts! (is-some (map-get? dca-schedules { schedule-id: (unwrap-panic dca-schedule-id) })) 
+                   err-schedule-not-found)
+          true
+        )
+        true
+      )
+      
+      ;; Create proposal
+      (map-set proposals
+        { proposal-id: proposal-id }
+        {
+          title: title,
+          description: description,
+          proposer: proposer,
+          proposal-type: proposal-type,
+          created-at: block-height,
+          voting-ends-at: (+ block-height voting-period),
+          execution-delay-until: (+ (+ block-height voting-period) execution-delay),
+          votes-for: u0,
+          votes-against: u0,
+          votes-abstain: u0,
+          status: "active",
+          executed-at: none,
+          strategy-id: strategy-id,
+          parameter-key: parameter-key,
+          parameter-value: parameter-value,
+          assets-affected: assets-affected,
+          transaction-data: transaction-data,
+          dca-schedule-id: dca-schedule-id,
+          voters: (list)
+        }
+      )
+      
+      ;; Increment proposal counter
+      (var-set next-proposal-id (+ proposal-id u1))
+      
+      (ok proposal-id)
+    )
+  )
+)
+
+;; Cast a vote on a proposal
+(define-public (cast-vote
+  (proposal-id uint)
+  (vote (string-ascii 7)))
+  
+  (let (
+    (voter tx-sender)
+    (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) err-proposal-not-found))
+    (voting-power-result (contract-call? (var-get dao-token-contract) get-balance voter))
+  )
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Check if voting period is still active
+    (asserts! (< block-height (get voting-ends-at proposal)) err-voting-period-ended)
+    
+    ;; Validate vote type
+    (asserts! (or (is-eq vote "for") (is-eq vote "against") (is-eq vote "abstain")) err-invalid-parameters)
+    
+    ;; Check if voter has already voted
+    (asserts! (is-none (find-voter (get voters proposal) voter)) err-vote-already-cast)
+    
+    ;; Get voting power
+    (let (
+      (voting-power (unwrap! voting-power-result err-transaction-failed))
+    )
+      (asserts! (> voting-power u0) err-not-enough-votes)
+      
+      ;; Record the vote
+      (map-set votes
+        { proposal-id: proposal-id, voter: voter }
+        {
+          vote: vote,
+          voting-power: voting-power,
+          vote-cast-at: block-height
+        }
+      )
+      
+      ;; Update proposal vote counts
+      (let (
+        (updated-votes-for (if (is-eq vote "for") (+ (get votes-for proposal) voting-power) (get votes-for proposal)))
+        (updated-votes-against (if (is-eq vote "against") (+ (get votes-against proposal) voting-power) (get votes-against proposal)))
+        (updated-votes-abstain (if (is-eq vote "abstain") (+ (get votes-abstain proposal) voting-power) (get votes-abstain proposal)))
+        (updated-voters (append (get voters proposal) voter))
+      )
+        (map-set proposals
+          { proposal-id: proposal-id }
+          (merge proposal {
+            votes-for: updated-votes-for,
+            votes-against: updated-votes-against,
+            votes-abstain: updated-votes-abstain,
+            voters: updated-voters
+          })
+        )
+        
+        (ok {
+          proposal-id: proposal-id,
+          vote: vote,
+          voting-power: voting-power
+        })
+      )
+    )
+  )
+)
+
+;; Helper to find if a voter has voted
+(define-private (find-voter (voters (list 100 principal)) (target principal))
+  (index-of voters target)
+)
+
+;; Finalize a proposal after voting period ends
+(define-public (finalize-proposal (proposal-id uint))
+  (let (
+    (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) err-proposal-not-found))
+    (quorum-threshold (var-get quorum-threshold))
+  )
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Check if voting period has ended
+    (asserts! (>= block-height (get voting-ends-at proposal)) err-voting-period-active)
+    
+    ;; Check that proposal is still active
+    (asserts! (is-eq (get status proposal) "active") err-proposal-already-executed)
+    
+    ;; Get total token supply
+    (let (
+      (total-supply-result (contract-call? (var-get dao-token-contract) get-total-supply))
+      (total-votes (+ (+ (get votes-for proposal) (get votes-against proposal)) (get votes-abstain proposal)))
+    )
+      (match total-supply-result
+        total-supply (let (
+                        (quorum-requirement (/ (* total-supply quorum-threshold) u100))
+                      )
+                      ;; Check if quorum was reached
+                      (if (>= total-votes quorum-requirement)
+                        ;; Check if proposal passed (more votes for than against)
+                        (if (> (get votes-for proposal) (get votes-against proposal))
+                          (map-set proposals
+                            { proposal-id: proposal-id }
+                            (merge proposal { status: "approved" })
+                          )
+                          (map-set proposals
+                            { proposal-id: proposal-id }
+                            (merge proposal { status: "rejected" })
+                          )
+                        )
+                        ;; Not enough votes to reach quorum
+                        (map-set proposals
+                          { proposal-id: proposal-id }
+                          (merge proposal { status: "rejected" })
+                        )
+                      )
+                      (ok { proposal-id: proposal-id, status: (get status proposal) })
+                     )
+        error (err err-transaction-failed)
+      )
+    )
+  )
+)
+
+;; Execute an approved proposal after the execution delay
+(define-public (execute-proposal (proposal-id uint))
+  (let (
+    (executor tx-sender)
+    (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) err-proposal-not-found))
+  )
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Check if proposal is approved
+    (asserts! (is-eq (get status proposal) "approved") err-proposal-not-approved)
+    
+    ;; Check if execution delay has passed
+    (asserts! (>= block-height (get execution-delay-until proposal)) err-voting-period-active)
+    
+    ;; Check that proposal hasn't been executed yet
+    (asserts! (is-none (get executed-at proposal)) err-proposal-already-executed)
+    
+    ;; Execute proposal based on type
+    (let (
+      (proposal-type (get proposal-type proposal))
+      (result (execute-proposal-by-type proposal-id proposal-type proposal))
+    )
+      (if (is-ok result)
+        (begin
+          ;; Update proposal status to executed
+          (map-set proposals
+            { proposal-id: proposal-id }
+            (merge proposal {
+              status: "executed",
+              executed-at: (some block-height)
+            })
+          )
