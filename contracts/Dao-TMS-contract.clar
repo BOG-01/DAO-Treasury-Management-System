@@ -304,3 +304,199 @@
     (ok true)
   )
 )
+
+;; Register a new asset with the treasury
+(define-public (register-asset
+  (asset-id (string-ascii 20))
+  (name (string-ascii 40))
+  (token-type (string-ascii 10))
+  (contract (optional principal))
+  (oracle principal)
+  (risk-score uint)
+  (decimals uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    (asserts! (is-none (map-get? assets { asset-id: asset-id })) err-asset-exists)
+    
+    ;; Validate parameters
+    (asserts! (or (is-eq token-type "stx") 
+                (is-eq token-type "ft") 
+                (is-eq token-type "nft") 
+                (is-eq token-type "btc")) 
+              err-invalid-parameters)
+    (asserts! (and (>= risk-score u1) (<= risk-score u10)) err-invalid-parameters)
+    
+    ;; If token is FT or NFT, contract must be provided
+    (asserts! (or (is-eq token-type "stx") 
+                (is-eq token-type "btc") 
+                (is-some contract)) 
+              err-invalid-parameters)
+    
+    ;; Create asset entry
+    (map-set assets
+      { asset-id: asset-id }
+      {
+        name: name,
+        token-type: token-type,
+        contract: contract,
+        oracle: oracle,
+        current-price: u0,
+        last-price-update: block-height,
+        historical-prices: (list),
+        risk-score: risk-score,
+        current-allocation: u0,
+        target-allocation: u0,
+        balance: u0,
+        value-stx: u0,
+        decimals: decimals,
+        last-rebalance: block-height,
+        performance-7d: (to-int 0),
+        performance-30d: (to-int 0),
+        performance-90d: (to-int 0),
+        enabled: true
+      }
+    )
+    
+    (ok asset-id)
+  )
+)
+
+;; Update asset price from oracle
+(define-public (update-asset-price (asset-id (string-ascii 20)) (price uint))
+  (let (
+    (oracle tx-sender)
+    (asset (unwrap! (map-get? assets { asset-id: asset-id }) err-asset-not-found))
+  )
+    ;; Validate oracle
+    (asserts! (is-eq oracle (get oracle asset)) err-not-authorized)
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Update asset with new price
+    (let (
+      (historical-prices (get historical-prices asset))
+      (updated-history (if (>= (len historical-prices) u30)
+                         (add-price-to-history (buff-to-list (list-to-buff historical-prices) u1 u29) price)
+                         (append historical-prices { price: price, block-height: block-height })))
+      (old-price (get current-price asset))
+      (balance (get balance asset))
+      (value-stx (if (> price u0) (* balance price) u0))
+    )
+      ;; Update performances if we have an old price
+      (let (
+        (perf-7d (if (and (> old-price u0) (> (len updated-history) u7))
+                   (calculate-performance price (get price (unwrap-panic (element-at updated-history u7))))
+                   (get performance-7d asset)))
+        (perf-30d (if (and (> old-price u0) (> (len updated-history) u30))
+                    (calculate-performance price (get price (unwrap-panic (element-at updated-history u29))))
+                    (get performance-30d asset)))
+        (perf-90d (if (and (> old-price u0) (> (len updated-history) u30))
+                    ;; Use oldest available price for 90d if we don't have 90 days of data
+                    (calculate-performance price (get price (unwrap-panic (element-at updated-history (- (len updated-history) u1)))))
+                    (get performance-90d asset)))
+      )
+        (map-set assets
+          { asset-id: asset-id }
+          (merge asset {
+            current-price: price,
+            last-price-update: block-height,
+            historical-prices: updated-history,
+            value-stx: value-stx,
+            performance-7d: perf-7d,
+            performance-30d: perf-30d,
+            performance-90d: perf-90d
+          })
+        )
+        
+        ;; Check if rebalancing is needed
+        (let (
+          (rebalance-needed (check-rebalancing-needed))
+        )
+          (if (is-ok rebalance-needed)
+            (match (unwrap-panic rebalance-needed)
+              true (try! (auto-rebalance))
+              false (ok true)
+            )
+            (ok true)
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Helper to add price to history
+(define-private (add-price-to-history 
+  (history (list 30 { price: uint, block-height: uint }))
+  (new-price uint))
+  
+  (append history { price: new-price, block-height: block-height })
+)
+
+;; Calculate performance between two prices
+(define-private (calculate-performance (new-price uint) (old-price uint))
+  (if (> old-price u0)
+    (to-int (/ (* (- new-price old-price) u10000) old-price))
+    (to-int 0)
+  )
+)
+
+;; Create an investment strategy
+(define-public (create-strategy
+  (name (string-ascii 64))
+  (description (string-utf8 256))
+  (allocations (list 20 { asset-id: (string-ascii 20), allocation-bp: uint })))
+  
+  (let (
+    (creator tx-sender)
+    (strategy-id (var-get next-strategy-id))
+  )
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate allocations
+    (asserts! (> (len allocations) u0) err-invalid-parameters)
+    
+    ;; Check allocation total is 10000 (100%)
+    (let (
+      (total-allocation (fold add-allocation u0 allocations))
+    )
+      (asserts! (is-eq total-allocation u10000) err-invalid-parameters)
+      
+      ;; Calculate strategy risk profile
+      (let (
+        (risk-profile (calculate-strategy-risk allocations))
+      )
+        ;; Validate risk is within maximum
+        (asserts! (<= risk-profile (var-get max-risk-score)) err-risk-exceeded)
+        
+        ;; Create strategy
+        (map-set strategies
+          { strategy-id: strategy-id }
+          {
+            name: name,
+            description: description,
+            risk-profile: risk-profile,
+            allocations: allocations,
+            creator: creator,
+            created-at: block-height,
+            last-modified: block-height,
+            approved: false,
+            active: false,
+            performance-all-time: (to-int 0),
+            start-value: u0,
+            current-value: u0
+          }
+        )
+        
+        ;; Increment strategy counter
+        (var-set next-strategy-id (+ strategy-id u1))
+        
+        (ok {
+          strategy-id: strategy-id,
+          risk-profile: risk-profile
+        })
+      )
+    )
+  )
+)
