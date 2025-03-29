@@ -197,3 +197,110 @@
     strategy-id: (optional uint)
   }
 )
+;; DAO parameters that can be changed via governance
+(define-map dao-parameters
+  { param-key: (string-ascii 30) }
+  { 
+    param-value: uint,
+    param-type: (string-ascii 10), ;; "uint", "principal", "bool"
+    last-updated: uint,
+    updater: principal,
+    description: (string-ascii 64)
+  }
+)
+
+;; Initialize the DAO treasury
+(define-public (initialize 
+  (name (string-ascii 64))
+  (dao-token principal)
+  (guardian-address principal))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    ;; Set initial parameters
+    (var-set treasury-name name)
+    (var-set dao-token-contract dao-token)
+    (var-set guardian guardian-address)
+    
+    ;; Initialize default parameters
+    (map-set dao-parameters
+      { param-key: "quorum-threshold" }
+      {
+        param-value: u10,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Percentage of total token supply needed for quorum"
+      }
+    )
+    
+    (map-set dao-parameters
+      { param-key: "voting-period" }
+      {
+        param-value: u1008,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Voting period duration in blocks (7 days)"
+      }
+    )
+    
+    (map-set dao-parameters
+      { param-key: "execution-delay" }
+      {
+        param-value: u144,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Delay before approved proposals can be executed (1 day)"
+      }
+    )
+    
+    (map-set dao-parameters
+      { param-key: "minimum-proposal-threshold" }
+      {
+        param-value: u100000000,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Minimum tokens required to submit a proposal"
+      }
+    )
+    
+    (map-set dao-parameters
+      { param-key: "rebalance-threshold" }
+      {
+        param-value: u1000,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Threshold for auto-rebalancing (10%)"
+      }
+    )
+    
+    (map-set dao-parameters
+      { param-key: "max-risk-score" }
+      {
+        param-value: u7,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Maximum portfolio risk score (1-10)"
+      }
+    )
+    
+    (map-set dao-parameters
+      { param-key: "fees-bp" }
+      {
+        param-value: u50,
+        param-type: "uint",
+        last-updated: block-height,
+        updater: tx-sender,
+        description: "Treasury management fees in basis points (0.5%)"
+      }
+    )
+    
+    (ok true)
+  )
+)
