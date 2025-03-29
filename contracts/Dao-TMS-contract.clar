@@ -96,3 +96,104 @@
     current-value: uint ;; Current STX value
   }
 )
+;; Governance proposals
+(define-map proposals
+  { proposal-id: uint }
+  {
+    title: (string-ascii 64),
+    description: (string-utf8 512),
+    proposer: principal,
+    proposal-type: uint,
+    created-at: uint,
+    voting-ends-at: uint,
+    execution-delay-until: uint,
+    votes-for: uint,
+    votes-against: uint,
+    votes-abstain: uint,
+    status: (string-ascii 10), ;; "active", "approved", "rejected", "executed", "cancelled"
+    executed-at: (optional uint),
+    strategy-id: (optional uint), ;; For strategy proposals
+    parameter-key: (optional (string-ascii 30)), ;; For parameter change proposals
+    parameter-value: (optional uint), ;; For parameter change proposals
+    assets-affected: (list 10 (string-ascii 20)), ;; For asset allocation proposals
+    transaction-data: (optional (string-utf8 512)), ;; For manual transaction proposals
+    dca-schedule-id: (optional uint), ;; For DCA schedule proposals
+    voters: (list 100 principal)
+  }
+)
+
+;; Votes cast by members
+(define-map votes
+  { proposal-id: uint, voter: principal }
+  {
+    vote: (string-ascii 7), ;; "for", "against", or "abstain"
+    voting-power: uint,
+    vote-cast-at: uint
+  }
+)
+
+;; DCA (Dollar-Cost Averaging) schedules
+(define-map dca-schedules
+  { schedule-id: uint }
+  {
+    name: (string-ascii 64),
+    source-asset: (string-ascii 20),
+    target-asset: (string-ascii 20),
+    amount-per-period: uint,
+    period-length: uint, ;; In blocks
+    last-execution: uint,
+    next-execution: uint,
+    total-periods: uint,
+    periods-executed: uint,
+    created-at: uint,
+    creator: principal,
+    status: (string-ascii 10), ;; "active", "paused", "completed", "cancelled"
+    average-price: uint,
+    total-spent: uint,
+    total-acquired: uint
+  }
+)
+
+;; Rebalancing operations
+(define-map rebalance-operations
+  { rebalance-id: uint }
+  {
+    initiated-at: uint,
+    completed-at: (optional uint),
+    initiator: principal,
+    status: (string-ascii 10), ;; "active", "completed", "failed"
+    actions: (list 20 {
+      asset-id: (string-ascii 20),
+      action: (string-ascii 10), ;; "buy", "sell"
+      amount: uint,
+      value-stx: uint,
+      completed: bool
+    }),
+    starting-portfolio-value: uint,
+    ending-portfolio-value: uint,
+    gas-cost: uint
+  }
+)
+
+;; Performance reports
+(define-map performance-reports
+  { report-id: uint }
+  {
+    title: (string-ascii 64),
+    generated-at: uint,
+    period-start: uint,
+    period-end: uint,
+    total-value-start: uint,
+    total-value-end: uint,
+    performance-bp: int,
+    assets-performance: (list 20 {
+      asset-id: (string-ascii 20),
+      value-start: uint,
+      value-end: uint,
+      performance-bp: int
+    }),
+    transactions-count: uint,
+    gas-spent: uint,
+    strategy-id: (optional uint)
+  }
+)
